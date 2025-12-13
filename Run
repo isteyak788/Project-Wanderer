@@ -1,0 +1,446 @@
+using System.Collections;
+using UnityEngine;
+
+[RequireComponent(typeof(CharacterController))]
+public class Run : MonoBehaviour
+{
+    [Header("Movement Settings")]
+    public float moveSpeed = 5.0f;
+    public float accelerationTime = 0.1f;
+    public float deaccelerationTime = 0.15f;
+    public Transform playerCamera;
+
+    [Header("Slope Skate Settings")]
+    public float skateActivationAngle = 10f;
+    public float uphillSpeedMultiplier = 0.5f;
+    public float downhillSpeedMultiplier = 2.0f;
+    public float downhillForce = 15f;
+    public float maxSlopeAngle = 60f;
+    public float slopeCheckDistance = 1.5f;
+    public float groundCheckOffset = 0.2f;
+
+    [Header("Jump Settings")]
+    public float baseJumpHeight = 2.0f;
+    public float maxJumpHeight = 5.0f;
+    public float jumpBoostForce = 25f;
+    public float gravity = 30f;
+    public float fallGravityMultiplier = 2.0f;
+
+    [Header("Multijump & Upgrades")]
+    [Tooltip("Total maximum jumps allowed (e.g., 3 = triple jump)")]
+    public int maxJumpAmount = 3;
+
+    [Tooltip("If TRUE → player must collect upgrades to gain extra jumps. If FALSE → full jumps from start.")]
+    public bool collectJumpUpgrade = false;
+
+    [Tooltip("Drag jump upgrade trigger GameObjects here. First = double jump, Second = triple jump, etc.")]
+    public GameObject[] jumpUpgradeTriggers;
+
+    [Header("Dash Settings")]
+    public KeyCode dashKey = KeyCode.LeftShift;
+    public float dashDistance = 5f;
+    public float dashDuration = 0.2f;
+    public float dashCooldown = 1f;
+
+    [Header("Ground Detection")]
+    public Transform groundCheck;
+    public LayerMask groundLayer;
+    public float groundCheckRadius = 0.3f;
+
+    // Private variables
+    private CharacterController controller;
+    private Vector3 moveDirection;
+    private bool isGrounded;
+    private float velocityY;
+    private float rotationVelocity;
+
+    // Slope detection variables
+    private float currentSlopeAngle = 0f;
+    private Vector3 slopeNormal = Vector3.up;
+    private Vector3 downhillDirection = Vector3.zero;
+    private Vector3 uphillDirection = Vector3.zero;
+    private bool isOnSlope = false;
+    private bool isSkating = false;
+    private float originalMoveSpeed;
+    private bool isMovingUphill = false;
+    private bool isMovingDownhill = false;
+    private float slopeDirectionDot = 0f;
+
+    // Jump state
+    private bool isJumping = false;
+    private float initialJumpY;
+    private float initialJumpVelocity;
+    private int jumpsPerformed = 0;
+    private int maxJumpsInAir = 0;
+    private float groundLockoutTimer = 0f;
+
+    // Dash state
+    private bool isDashing = false;
+    private float dashCooldownTimer = 0f;
+    private Vector3 dashVelocity;
+
+    // Upgrade tracking
+    private bool[] collectedUpgrades;
+    private int totalJumpsAllowed = 1; // Start with 1 jump by default
+
+    private void Awake()
+    {
+        controller = GetComponent<CharacterController>();
+        initialJumpVelocity = Mathf.Sqrt(baseJumpHeight * 2f * gravity);
+        originalMoveSpeed = moveSpeed;
+
+        // Initialize jump system
+        if (collectJumpUpgrade)
+        {
+            // Start with only 1 jump (no air jumps)
+            totalJumpsAllowed = 1;
+            maxJumpsInAir = 0;
+            
+            // Initialize upgrade tracking
+            if (jumpUpgradeTriggers != null && jumpUpgradeTriggers.Length > 0)
+            {
+                collectedUpgrades = new bool[jumpUpgradeTriggers.Length];
+            }
+        }
+        else
+        {
+            // Start with full jumps immediately
+            totalJumpsAllowed = maxJumpAmount;
+            maxJumpsInAir = maxJumpAmount - 1;
+        }
+        
+        ResetJumpCount();
+    }
+
+    private void Update()
+    {
+        HandleGroundCheck();
+        DetectSlope();
+
+        // Cooldown timer
+        if (dashCooldownTimer > 0f) dashCooldownTimer -= Time.deltaTime;
+
+        // Dash input
+        if (Input.GetKeyDown(dashKey) && dashCooldownTimer <= 0f && !isDashing)
+        {
+            StartCoroutine(PerformDash());
+        }
+
+        // Normal movement & jumping (only when not dashing)
+        if (!isDashing)
+        {
+            HandleJumpLogic();
+            HandleMovement();
+        }
+        else
+        {
+            controller.Move(dashVelocity * Time.deltaTime);
+        }
+    }
+
+    private void HandleGroundCheck()
+    {
+        if (groundLockoutTimer > 0f)
+        {
+            groundLockoutTimer -= Time.deltaTime;
+            isGrounded = false;
+        }
+        else
+        {
+            bool wasGrounded = isGrounded;
+            isGrounded = Physics.CheckSphere(groundCheck.position, groundCheckRadius, groundLayer);
+
+            // Reset jumps when landing
+            if (!wasGrounded && isGrounded)
+            {
+                isJumping = false;
+                ResetJumpCount();
+            }
+        }
+    }
+
+    private void DetectSlope()
+    {
+        RaycastHit hit;
+        Vector3 rayOrigin = transform.position + Vector3.up * groundCheckOffset;
+        
+        if (Physics.Raycast(rayOrigin, Vector3.down, out hit, slopeCheckDistance, groundLayer))
+        {
+            slopeNormal = hit.normal;
+            currentSlopeAngle = Vector3.Angle(slopeNormal, Vector3.up);
+            
+            downhillDirection = Vector3.ProjectOnPlane(Vector3.down, slopeNormal).normalized;
+            uphillDirection = -downhillDirection;
+            
+            isOnSlope = currentSlopeAngle > skateActivationAngle && currentSlopeAngle <= maxSlopeAngle;
+            
+            if (isOnSlope && !isSkating)
+            {
+                isSkating = true;
+            }
+            else if (!isOnSlope && isSkating)
+            {
+                isSkating = false;
+                moveSpeed = originalMoveSpeed;
+            }
+        }
+        else
+        {
+            isOnSlope = false;
+            currentSlopeAngle = 0f;
+            slopeNormal = Vector3.up;
+            
+            if (isSkating)
+            {
+                isSkating = false;
+                moveSpeed = originalMoveSpeed;
+            }
+        }
+    }
+
+    private Vector3 GetSlopeAdjustedMovement(Vector3 direction)
+    {
+        if (!isOnSlope) return direction;
+        return Vector3.ProjectOnPlane(direction, slopeNormal).normalized * direction.magnitude;
+    }
+
+    private void HandleJumpLogic()
+    {
+        // Landing gravity reset
+        if (isGrounded && velocityY < 0f)
+        {
+            velocityY = -2f;
+        }
+
+        // JUMP INPUT
+        if (Input.GetButtonDown("Jump"))
+        {
+            if (isGrounded)
+            {
+                // Ground jump
+                PerformJump();
+                jumpsPerformed = 1;
+            }
+            else if (jumpsPerformed > 0 && jumpsPerformed < totalJumpsAllowed)
+            {
+                // Air jump - can jump until we reach totalJumpsAllowed
+                PerformJump();
+                jumpsPerformed++;
+            }
+        }
+
+        // Variable jump height
+        if (isJumping && Input.GetButton("Jump"))
+        {
+            if (transform.position.y < initialJumpY + maxJumpHeight)
+            {
+                velocityY += jumpBoostForce * Time.deltaTime;
+            }
+        }
+
+        if (Input.GetButtonUp("Jump")) isJumping = false;
+
+        // Apply gravity
+        if (!isGrounded)
+        {
+            float currentGravity = gravity;
+            if (velocityY < 0f) currentGravity *= fallGravityMultiplier;
+            velocityY -= currentGravity * Time.deltaTime;
+        }
+    }
+
+    private void PerformJump()
+    {
+        velocityY = initialJumpVelocity;
+        isJumping = true;
+        isGrounded = false;
+        groundLockoutTimer = 0.1f;
+        initialJumpY = transform.position.y;
+    }
+
+    private void ResetJumpCount()
+    {
+        jumpsPerformed = 0;
+        maxJumpsInAir = totalJumpsAllowed - 1;
+    }
+
+    // Handle trigger collisions for upgrades
+    private void OnTriggerEnter(Collider other)
+    {
+        // Check if this is one of our upgrade triggers
+        if (jumpUpgradeTriggers != null && jumpUpgradeTriggers.Length > 0)
+        {
+            for (int i = 0; i < jumpUpgradeTriggers.Length; i++)
+            {
+                if (jumpUpgradeTriggers[i] == other.gameObject)
+                {
+                    CollectJumpUpgrade(i);
+                    break;
+                }
+            }
+        }
+    }
+
+    private void CollectJumpUpgrade(int triggerIndex)
+    {
+        if (!collectJumpUpgrade) return;
+        
+        // Check if we already collected this upgrade
+        if (collectedUpgrades != null && triggerIndex < collectedUpgrades.Length)
+        {
+            if (collectedUpgrades[triggerIndex]) return; // Already collected
+            
+            collectedUpgrades[triggerIndex] = true;
+            
+            // Calculate new total jumps: 1 (default) + number of collected upgrades
+            int collectedCount = 0;
+            for (int i = 0; i < collectedUpgrades.Length; i++)
+            {
+                if (collectedUpgrades[i]) collectedCount++;
+            }
+            
+            // New total jumps = 1 + collected upgrades
+            int newTotalJumps = 1 + collectedCount;
+            
+            // Don't exceed maxJumpAmount
+            if (newTotalJumps <= maxJumpAmount)
+            {
+                totalJumpsAllowed = newTotalJumps;
+                
+                // Update max air jumps
+                maxJumpsInAir = totalJumpsAllowed - 1;
+                
+                // Reset jump count if on ground
+                if (isGrounded)
+                {
+                    ResetJumpCount();
+                }
+                
+                // Destroy the trigger object
+                Destroy(jumpUpgradeTriggers[triggerIndex]);
+                
+                Debug.Log($"Jump upgrade collected! Now have {totalJumpsAllowed} jumps total.");
+            }
+            else
+            {
+                Debug.Log($"Max jumps ({maxJumpAmount}) already reached!");
+            }
+        }
+    }
+
+    private void HandleMovement()
+    {
+        float h = Input.GetAxisRaw("Horizontal");
+        float v = Input.GetAxisRaw("Vertical");
+
+        Vector3 camForward = Vector3.Scale(playerCamera.forward, new Vector3(1, 0, 1)).normalized;
+        Vector3 camRight = Vector3.Scale(playerCamera.right, new Vector3(1, 0, 1)).normalized;
+        Vector3 inputDir = (camRight * h + camForward * v).normalized;
+
+        Vector3 adjustedInputDir = GetSlopeAdjustedMovement(inputDir);
+        
+        float lerpTime = isGrounded ? accelerationTime : deaccelerationTime;
+        Vector3 targetMoveDirection = adjustedInputDir * moveSpeed;
+        
+        isMovingUphill = false;
+        isMovingDownhill = false;
+        
+        // Slope movement logic
+        if (isSkating && isOnSlope && inputDir.magnitude > 0.1f)
+        {
+            float forwardOnSlope = Vector3.Dot(adjustedInputDir.normalized, downhillDirection);
+            
+            if (forwardOnSlope > 0.1f)
+            {
+                // Downhill
+                isMovingDownhill = true;
+                targetMoveDirection *= downhillSpeedMultiplier;
+                
+                float downhillBoost = Mathf.Clamp01(currentSlopeAngle / 45f) * downhillForce;
+                targetMoveDirection += downhillDirection * downhillBoost * Time.deltaTime;
+            }
+            else if (forwardOnSlope < -0.1f)
+            {
+                // Uphill
+                isMovingUphill = true;
+                targetMoveDirection *= uphillSpeedMultiplier;
+                
+                // Ensure minimum uphill movement
+                if (targetMoveDirection.magnitude < moveSpeed * 0.3f)
+                {
+                    targetMoveDirection = adjustedInputDir.normalized * (moveSpeed * uphillSpeedMultiplier);
+                }
+            }
+            
+            slopeDirectionDot = forwardOnSlope;
+        }
+        else if (isSkating && isOnSlope && inputDir.magnitude <= 0.1f)
+        {
+            // Auto-slide downhill
+            isMovingDownhill = true;
+            float autoSlideForce = Mathf.Clamp01(currentSlopeAngle / 45f) * downhillForce * 0.5f;
+            targetMoveDirection += downhillDirection * autoSlideForce * Time.deltaTime;
+        }
+        
+        // Prevent complete stop on uphill
+        if (inputDir.magnitude > 0.1f && targetMoveDirection.magnitude < moveSpeed * 0.1f && isOnSlope)
+        {
+            targetMoveDirection = adjustedInputDir * (moveSpeed * uphillSpeedMultiplier * 0.5f);
+        }
+        
+        // Smooth movement
+        moveDirection = Vector3.Lerp(moveDirection, targetMoveDirection, Time.deltaTime / lerpTime);
+
+        // Rotation
+        if (adjustedInputDir.magnitude > 0.01f)
+        {
+            float targetAngle = Mathf.Atan2(adjustedInputDir.x, adjustedInputDir.z) * Mathf.Rad2Deg;
+            float angle = Mathf.SmoothDampAngle(transform.eulerAngles.y, targetAngle, ref rotationVelocity, 0.05f);
+            transform.rotation = Quaternion.Euler(0f, angle, 0f);
+        }
+
+        // Apply movement
+        Vector3 finalVelocity = moveDirection + Vector3.up * velocityY;
+        controller.Move(finalVelocity * Time.deltaTime);
+    }
+
+    private IEnumerator PerformDash()
+    {
+        isDashing = true;
+        dashCooldownTimer = dashCooldown;
+
+        Vector3 dashDir = transform.forward;
+        dashVelocity = dashDir * (dashDistance / dashDuration);
+
+        float originalGravity = gravity;
+        gravity = 0f;
+        velocityY = 0f;
+
+        yield return new WaitForSeconds(dashDuration);
+
+        gravity = originalGravity;
+        isDashing = false;
+        moveDirection = Vector3.zero;
+        velocityY = 0f;
+    }
+
+    private void OnControllerColliderHit(ControllerColliderHit hit)
+    {
+        if (hit.normal.y < 1f)
+        {
+            float collisionAngle = Vector3.Angle(Vector3.up, hit.normal);
+            if (collisionAngle > skateActivationAngle && collisionAngle <= maxSlopeAngle)
+            {
+                slopeNormal = hit.normal;
+                currentSlopeAngle = collisionAngle;
+                downhillDirection = Vector3.ProjectOnPlane(Vector3.down, slopeNormal).normalized;
+                uphillDirection = -downhillDirection;
+                
+                if (!isSkating)
+                {
+                    isSkating = true;
+                }
+            }
+        }
+    }
+}
