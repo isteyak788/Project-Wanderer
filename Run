@@ -5,15 +5,22 @@ using UnityEngine;
 public class Run : MonoBehaviour
 {
     [Header("Movement Settings")]
-    public float moveSpeed = 5.0f;
+    public float walkSpeed = 5.0f;
     public float accelerationTime = 0.1f;
     public float deaccelerationTime = 0.15f;
     public Transform playerCamera;
+
+    [Header("Run Settings")]
+    public float runSpeed = 8.0f;
+    public KeyCode runKey = KeyCode.S;
+    public float runAccelerationTime = 0.2f;
+    public float runDeaccelerationTime = 0.25f;
 
     [Header("Slope Skate Settings")]
     public float skateActivationAngle = 10f;
     public float uphillSpeedMultiplier = 0.5f;
     public float downhillSpeedMultiplier = 2.0f;
+    public float downhillAccelerationTime = 0.5f;
     public float downhillForce = 15f;
     public float maxSlopeAngle = 60f;
     public float slopeCheckDistance = 1.5f;
@@ -25,6 +32,7 @@ public class Run : MonoBehaviour
     public float jumpBoostForce = 25f;
     public float gravity = 30f;
     public float fallGravityMultiplier = 2.0f;
+    public float coyoteTime = 0.1f;
 
     [Header("Multijump & Upgrades")]
     [Tooltip("Total maximum jumps allowed (e.g., 3 = triple jump)")]
@@ -37,10 +45,39 @@ public class Run : MonoBehaviour
     public GameObject[] jumpUpgradeTriggers;
 
     [Header("Dash Settings")]
-    public KeyCode dashKey = KeyCode.LeftShift;
+    public KeyCode dashKey = KeyCode.LeftShift; 
     public float dashDistance = 5f;
     public float dashDuration = 0.2f;
     public float dashCooldown = 1f;
+
+    [Header("Glide Settings")]
+    public KeyCode glideKey = KeyCode.Q;
+    [Tooltip("Multiplier applied to base movement speed while gliding")]
+    public float glideSpeedMultiplier = 1.0f;
+    public float glideGravityMultiplier = 0.5f;
+    public float glideAccelerationTime = 0.3f;
+    public float glideDecelerationTime = 0.2f;
+    public bool glideUsesVelocity = true;
+
+    [Header("Super Glide Settings")]
+    public KeyCode superGlideKey1 = KeyCode.Q;
+    public KeyCode superGlideKey2 = KeyCode.E;
+    [Tooltip("Initial multiplier applied to base movement speed when starting super glide")]
+    public float superGlideSpeedMultiplier = 1.6f;
+    [Tooltip("Maximum multiplier applied to base movement speed after acceleration")]
+    public float superGlideMaxSpeedMultiplier = 2.5f;
+    [Tooltip("Time to accelerate from initial to maximum speed")]
+    public float superGlideAccelerationToMaxTime = 2.0f;
+    public float superGlideGravityMultiplier = 0.3f;
+    public float superGlideAccelerationTime = 0.4f;
+    public float superGlideDecelerationTime = 0.3f;
+
+    [Header("Super Slide Settings")]
+    public KeyCode superSlideKey = KeyCode.LeftShift;
+    public float superSlideSpeedMultiplier = 2.5f;
+    public float superSlideUphillMultiplier = 0.7f;
+    public float superSlideDownhillMultiplier = 3.0f;
+    public float superSlideForce = 25f;
 
     [Header("Ground Detection")]
     public Transform groundCheck;
@@ -61,10 +98,14 @@ public class Run : MonoBehaviour
     private Vector3 uphillDirection = Vector3.zero;
     private bool isOnSlope = false;
     private bool isSkating = false;
-    private float originalMoveSpeed;
+    private float currentMoveSpeed;
     private bool isMovingUphill = false;
     private bool isMovingDownhill = false;
     private float slopeDirectionDot = 0f;
+    
+    // Downhill acceleration
+    private float currentDownhillMultiplier = 1.0f;
+    private float downhillAccelerationTimer = 0f;
 
     // Jump state
     private bool isJumping = false;
@@ -73,30 +114,52 @@ public class Run : MonoBehaviour
     private int jumpsPerformed = 0;
     private int maxJumpsInAir = 0;
     private float groundLockoutTimer = 0f;
+    private float coyoteTimer = 0f;
 
     // Dash state
     private bool isDashing = false;
+    private bool dashKeyPressed = false;
     private float dashCooldownTimer = 0f;
     private Vector3 dashVelocity;
+    private Vector3 dashDirection;
+
+    // Glide state
+    private bool isGlideActive = false;
+    private Vector3 glideVelocity = Vector3.zero;
+    private float glideCurrentSpeed = 0f;
+    private float glideSpeedSmoothVelocity = 0f;
+    private float targetGlideSpeed = 0f;
+
+    // Super Glide state
+    private bool isSuperGlideActive = false;
+    private float superGlideCurrentSpeed = 0f;
+    private float superGlideSpeedSmoothVelocity = 0f;
+    private float targetSuperGlideSpeed = 0f;
+    private float superGlideAccelerationTimer = 0f;
+    private float currentSuperGlideMultiplier = 1.0f;
+
+    // Super Slide state
+    private bool isSuperSlideActive = false;
 
     // Upgrade tracking
     private bool[] collectedUpgrades;
-    private int totalJumpsAllowed = 1; // Start with 1 jump by default
+    private int totalJumpsAllowed = 1;
+
+    // State for running
+    private bool isRunActive = false;
+    private float runSpeedSmoothVelocity;
 
     private void Awake()
     {
         controller = GetComponent<CharacterController>();
         initialJumpVelocity = Mathf.Sqrt(baseJumpHeight * 2f * gravity);
-        originalMoveSpeed = moveSpeed;
+        currentMoveSpeed = walkSpeed;
 
-        // Initialize jump system
         if (collectJumpUpgrade)
         {
-            // Start with only 1 jump (no air jumps)
             totalJumpsAllowed = 1;
             maxJumpsInAir = 0;
             
-            // Initialize upgrade tracking
             if (jumpUpgradeTriggers != null && jumpUpgradeTriggers.Length > 0)
             {
                 collectedUpgrades = new bool[jumpUpgradeTriggers.Length];
@@ -104,7 +167,6 @@ public class Run : MonoBehaviour
         }
         else
         {
-            // Start with full jumps immediately
             totalJumpsAllowed = maxJumpAmount;
             maxJumpsInAir = maxJumpAmount - 1;
         }
@@ -116,17 +178,74 @@ public class Run : MonoBehaviour
     {
         HandleGroundCheck();
         DetectSlope();
+        UpdateCoyoteTime();
 
-        // Cooldown timer
         if (dashCooldownTimer > 0f) dashCooldownTimer -= Time.deltaTime;
 
-        // Dash input
-        if (Input.GetKeyDown(dashKey) && dashCooldownTimer <= 0f && !isDashing)
+        // Handle dash input only
+        HandleDashInput();
+
+        // Handle Super Glide input - requires both keys to be held
+        bool bothSuperGlideKeysHeld = Input.GetKey(superGlideKey1) && Input.GetKey(superGlideKey2);
+        
+        // Handle glide activation/deactivation - ONLY when truly airborne
+        bool isAirborne = !isGrounded && !controller.isGrounded && velocityY <= 0f;
+        bool canActivateGlide = isAirborne && !isDashing;
+
+        if (canActivateGlide)
         {
-            StartCoroutine(PerformDash());
+            // Check for Super Glide first (takes priority)
+            if (bothSuperGlideKeysHeld)
+            {
+                if (!isSuperGlideActive)
+                {
+                    ActivateSuperGlide();
+                }
+                // Make sure normal glide is off when super glide is active
+                if (isGlideActive)
+                {
+                    DeactivateGlide();
+                }
+            }
+            else
+            {
+                if (isSuperGlideActive)
+                {
+                    DeactivateSuperGlide();
+                }
+                
+                // Check for normal Glide
+                if (Input.GetKey(glideKey))
+                {
+                    if (!isGlideActive)
+                    {
+                        ActivateGlide();
+                    }
+                }
+                else
+                {
+                    if (isGlideActive)
+                    {
+                        DeactivateGlide();
+                    }
+                }
+            }
+        }
+        else
+        {
+            // Deactivate glides when grounded or dashing
+            if (isGlideActive)
+            {
+                DeactivateGlide();
+            }
+            if (isSuperGlideActive)
+            {
+                DeactivateSuperGlide();
+            }
         }
 
-        // Normal movement & jumping (only when not dashing)
+        HandleJumpInput();
+
         if (!isDashing)
         {
             HandleJumpLogic();
@@ -134,7 +253,74 @@ public class Run : MonoBehaviour
         }
         else
         {
-            controller.Move(dashVelocity * Time.deltaTime);
+            HandleDashMovement();
+        }
+    }
+
+    private void HandleDashInput()
+    {
+        // Dash: triggered by GetKeyDown(dashKey)
+        if (Input.GetKeyDown(dashKey) && dashCooldownTimer <= 0f && !isDashing && !isGlideActive && !isSuperGlideActive)
+        {
+            dashKeyPressed = true;
+            StartCoroutine(PerformDash());
+        }
+        
+        // Super Slide: uses superSlideKey for holding and W for direction on slope
+        if (Input.GetKey(superSlideKey) && Input.GetKey(KeyCode.W) && isSkating && isOnSlope)
+        {
+            isSuperSlideActive = true;
+        }
+        else
+        {
+            isSuperSlideActive = false;
+        }
+    }
+
+    private void HandleDashMovement()
+    {
+        // Apply dash movement
+        controller.Move(dashVelocity * Time.deltaTime);
+        
+        // Rotate player to face dash direction during dash
+        if (dashDirection != Vector3.zero)
+        {
+            float targetAngle = Mathf.Atan2(dashDirection.x, dashDirection.z) * Mathf.Rad2Deg;
+            float angle = Mathf.SmoothDampAngle(transform.eulerAngles.y, targetAngle, ref rotationVelocity, 0.05f);
+            transform.rotation = Quaternion.Euler(0f, angle, 0f);
+        }
+    }
+
+    private void HandleJumpInput()
+    {
+        if (Input.GetButtonDown("Jump"))
+        {
+            if (isGrounded || coyoteTimer > 0f)
+            {
+                PerformJump();
+                jumpsPerformed = 1;
+                coyoteTimer = 0f;
+            }
+            else if (jumpsPerformed > 0 && jumpsPerformed < totalJumpsAllowed)
+            {
+                PerformJump();
+                jumpsPerformed++;
+            }
+        }
+    }
+
+    private void UpdateCoyoteTime()
+    {
+        if (isGrounded)
+        {
+            coyoteTimer = coyoteTime;
+        }
+        else
+        {
+            if (!isJumping && coyoteTimer > 0f)
+            {
+                coyoteTimer -= Time.deltaTime;
+            }
         }
     }
 
@@ -150,11 +336,20 @@ public class Run : MonoBehaviour
             bool wasGrounded = isGrounded;
             isGrounded = Physics.CheckSphere(groundCheck.position, groundCheckRadius, groundLayer);
 
-            // Reset jumps when landing
             if (!wasGrounded && isGrounded)
             {
                 isJumping = false;
                 ResetJumpCount();
+                
+                // Deactivate glides when landing
+                if (isGlideActive)
+                {
+                    DeactivateGlide();
+                }
+                if (isSuperGlideActive)
+                {
+                    DeactivateSuperGlide();
+                }
             }
         }
     }
@@ -181,7 +376,8 @@ public class Run : MonoBehaviour
             else if (!isOnSlope && isSkating)
             {
                 isSkating = false;
-                moveSpeed = originalMoveSpeed;
+                currentMoveSpeed = walkSpeed;
+                ResetDownhillAcceleration();
             }
         }
         else
@@ -193,9 +389,16 @@ public class Run : MonoBehaviour
             if (isSkating)
             {
                 isSkating = false;
-                moveSpeed = originalMoveSpeed;
+                currentMoveSpeed = walkSpeed;
+                ResetDownhillAcceleration();
             }
         }
+    }
+
+    private void ResetDownhillAcceleration()
+    {
+        currentDownhillMultiplier = 1.0f;
+        downhillAccelerationTimer = 0f;
     }
 
     private Vector3 GetSlopeAdjustedMovement(Vector3 direction)
@@ -206,31 +409,13 @@ public class Run : MonoBehaviour
 
     private void HandleJumpLogic()
     {
-        // Landing gravity reset
         if (isGrounded && velocityY < 0f)
         {
             velocityY = -2f;
         }
 
-        // JUMP INPUT
-        if (Input.GetButtonDown("Jump"))
-        {
-            if (isGrounded)
-            {
-                // Ground jump
-                PerformJump();
-                jumpsPerformed = 1;
-            }
-            else if (jumpsPerformed > 0 && jumpsPerformed < totalJumpsAllowed)
-            {
-                // Air jump - can jump until we reach totalJumpsAllowed
-                PerformJump();
-                jumpsPerformed++;
-            }
-        }
-
-        // Variable jump height
-        if (isJumping && Input.GetButton("Jump"))
+        // Apply jump boost while holding jump button (only if not gliding)
+        if (isJumping && Input.GetButton("Jump") && !isGlideActive && !isSuperGlideActive)
         {
             if (transform.position.y < initialJumpY + maxJumpHeight)
             {
@@ -238,13 +423,31 @@ public class Run : MonoBehaviour
             }
         }
 
-        if (Input.GetButtonUp("Jump")) isJumping = false;
+        if (Input.GetButtonUp("Jump")) 
+        {
+            isJumping = false;
+        }
 
-        // Apply gravity
         if (!isGrounded)
         {
             float currentGravity = gravity;
-            if (velocityY < 0f) currentGravity *= fallGravityMultiplier;
+            
+            // Apply Super Glide gravity multiplier if active
+            if (isSuperGlideActive)
+            {
+                currentGravity *= superGlideGravityMultiplier;
+            }
+            // Apply normal Glide gravity multiplier if active
+            else if (isGlideActive)
+            {
+                currentGravity *= glideGravityMultiplier;
+            }
+            // Apply fall gravity multiplier when descending (not in glide)
+            else if (velocityY < 0f)
+            {
+                currentGravity *= fallGravityMultiplier;
+            }
+            
             velocityY -= currentGravity * Time.deltaTime;
         }
     }
@@ -256,6 +459,16 @@ public class Run : MonoBehaviour
         isGrounded = false;
         groundLockoutTimer = 0.1f;
         initialJumpY = transform.position.y;
+        
+        // Deactivate glides when jumping
+        if (isGlideActive)
+        {
+            DeactivateGlide();
+        }
+        if (isSuperGlideActive)
+        {
+            DeactivateSuperGlide();
+        }
     }
 
     private void ResetJumpCount()
@@ -264,10 +477,8 @@ public class Run : MonoBehaviour
         maxJumpsInAir = totalJumpsAllowed - 1;
     }
 
-    // Handle trigger collisions for upgrades
     private void OnTriggerEnter(Collider other)
     {
-        // Check if this is one of our upgrade triggers
         if (jumpUpgradeTriggers != null && jumpUpgradeTriggers.Length > 0)
         {
             for (int i = 0; i < jumpUpgradeTriggers.Length; i++)
@@ -285,45 +496,31 @@ public class Run : MonoBehaviour
     {
         if (!collectJumpUpgrade) return;
         
-        // Check if we already collected this upgrade
         if (collectedUpgrades != null && triggerIndex < collectedUpgrades.Length)
         {
-            if (collectedUpgrades[triggerIndex]) return; // Already collected
+            if (collectedUpgrades[triggerIndex]) return;
             
             collectedUpgrades[triggerIndex] = true;
             
-            // Calculate new total jumps: 1 (default) + number of collected upgrades
             int collectedCount = 0;
             for (int i = 0; i < collectedUpgrades.Length; i++)
             {
                 if (collectedUpgrades[i]) collectedCount++;
             }
             
-            // New total jumps = 1 + collected upgrades
             int newTotalJumps = 1 + collectedCount;
             
-            // Don't exceed maxJumpAmount
             if (newTotalJumps <= maxJumpAmount)
             {
                 totalJumpsAllowed = newTotalJumps;
-                
-                // Update max air jumps
                 maxJumpsInAir = totalJumpsAllowed - 1;
                 
-                // Reset jump count if on ground
                 if (isGrounded)
                 {
                     ResetJumpCount();
                 }
                 
-                // Destroy the trigger object
                 Destroy(jumpUpgradeTriggers[triggerIndex]);
-                
-                Debug.Log($"Jump upgrade collected! Now have {totalJumpsAllowed} jumps total.");
-            }
-            else
-            {
-                Debug.Log($"Max jumps ({maxJumpAmount}) already reached!");
             }
         }
     }
@@ -335,66 +532,226 @@ public class Run : MonoBehaviour
 
         Vector3 camForward = Vector3.Scale(playerCamera.forward, new Vector3(1, 0, 1)).normalized;
         Vector3 camRight = Vector3.Scale(playerCamera.right, new Vector3(1, 0, 1)).normalized;
-        Vector3 inputDir = (camRight * h + camForward * v).normalized;
+        
+        // Check if run key is pressed
+        bool wasRunActive = isRunActive;
+        isRunActive = Input.GetKey(runKey);
+        
+        Vector3 inputDir;
+        
+        if (isRunActive)
+        {
+            // Only move in camera's forward direction when run key is pressed
+            inputDir = camForward;
+        }
+        else
+        {
+            // Original movement with WASD
+            inputDir = (camRight * h + camForward * v).normalized;
+        }
 
         Vector3 adjustedInputDir = GetSlopeAdjustedMovement(inputDir);
         
-        float lerpTime = isGrounded ? accelerationTime : deaccelerationTime;
-        Vector3 targetMoveDirection = adjustedInputDir * moveSpeed;
+        // Calculate base movement speed (walk or run)
+        float baseSpeed = isRunActive ? runSpeed : walkSpeed;
         
-        isMovingUphill = false;
-        isMovingDownhill = false;
+        // SUPER GLIDE MOVEMENT - Takes priority
+        if (isSuperGlideActive)
+        {
+            // Super Glide always moves in camera's forward direction
+            inputDir = camForward;
+            adjustedInputDir = GetSlopeAdjustedMovement(inputDir);
+            
+            // Handle acceleration to max speed over time
+            if (superGlideAccelerationToMaxTime > 0f)
+            {
+                superGlideAccelerationTimer += Time.deltaTime;
+                float progress = Mathf.Clamp01(superGlideAccelerationTimer / superGlideAccelerationToMaxTime);
+                currentSuperGlideMultiplier = Mathf.Lerp(superGlideSpeedMultiplier, superGlideMaxSpeedMultiplier, progress);
+            }
+            else
+            {
+                currentSuperGlideMultiplier = superGlideMaxSpeedMultiplier;
+            }
+            
+            // Calculate target speed with current multiplier
+            float currentTargetSpeed = baseSpeed * currentSuperGlideMultiplier;
+            
+            // Smooth transition to target speed
+            float currentSpeed = Mathf.SmoothDamp(superGlideCurrentSpeed, currentTargetSpeed, ref superGlideSpeedSmoothVelocity, superGlideAccelerationTime);
+            superGlideCurrentSpeed = currentSpeed;
+            targetSuperGlideSpeed = currentTargetSpeed;
+        }
+        // NORMAL GLIDE MOVEMENT
+        else if (isGlideActive)
+        {
+            float currentTargetSpeed = baseSpeed * glideSpeedMultiplier;
+            
+            // Smoothly transition to glide speed
+            float currentSpeed = Mathf.SmoothDamp(glideCurrentSpeed, currentTargetSpeed, ref glideSpeedSmoothVelocity, glideAccelerationTime);
+            glideCurrentSpeed = currentSpeed;
+            targetGlideSpeed = currentTargetSpeed;
+        }
+        // RUNNING
+        else if (isRunActive)
+        {
+            // Smoothly transition between walk and run speeds
+            float currentSpeed = Mathf.SmoothDamp(currentMoveSpeed, runSpeed, ref runSpeedSmoothVelocity, 
+                isGrounded ? runAccelerationTime : runDeaccelerationTime);
+            currentMoveSpeed = currentSpeed;
+        }
+        // WALKING
+        else
+        {
+            // Smoothly transition to walk speed
+            float currentSpeed = Mathf.SmoothDamp(currentMoveSpeed, walkSpeed, ref runSpeedSmoothVelocity, 
+                isGrounded ? accelerationTime : deaccelerationTime);
+            currentMoveSpeed = currentSpeed;
+        }
         
-        // Slope movement logic
-        if (isSkating && isOnSlope && inputDir.magnitude > 0.1f)
+        Vector3 targetMoveDirection = Vector3.zero;
+        
+        // Calculate final movement direction and speed
+        if (isSuperGlideActive)
+        {
+            targetMoveDirection = adjustedInputDir * superGlideCurrentSpeed;
+        }
+        else if (isGlideActive)
+        {
+            targetMoveDirection = adjustedInputDir * glideCurrentSpeed;
+        }
+        else
+        {
+            targetMoveDirection = adjustedInputDir * currentMoveSpeed;
+        }
+        
+        // Slope movement logic (doesn't apply to super glide)
+        if (!isSuperGlideActive && isSkating && isOnSlope && inputDir.magnitude > 0.1f)
         {
             float forwardOnSlope = Vector3.Dot(adjustedInputDir.normalized, downhillDirection);
             
             if (forwardOnSlope > 0.1f)
             {
-                // Downhill
                 isMovingDownhill = true;
-                targetMoveDirection *= downhillSpeedMultiplier;
                 
-                float downhillBoost = Mathf.Clamp01(currentSlopeAngle / 45f) * downhillForce;
+                // Use Super Slide settings if active, otherwise normal slide settings
+                float currentDownhillMult = isSuperSlideActive ? superSlideDownhillMultiplier : downhillSpeedMultiplier;
+                float currentSlideForce = isSuperSlideActive ? superSlideForce : downhillForce;
+                
+                if (downhillAccelerationTime > 0)
+                {
+                    downhillAccelerationTimer += Time.deltaTime;
+                    float progress = Mathf.Clamp01(downhillAccelerationTimer / downhillAccelerationTime);
+                    currentDownhillMultiplier = Mathf.Lerp(1.0f, currentDownhillMult, progress);
+                }
+                else
+                {
+                    currentDownhillMultiplier = currentDownhillMult;
+                }
+                
+                targetMoveDirection *= currentDownhillMultiplier;
+                
+                float downhillBoost = Mathf.Clamp01(currentSlopeAngle / 45f) * currentSlideForce * currentDownhillMultiplier;
                 targetMoveDirection += downhillDirection * downhillBoost * Time.deltaTime;
             }
             else if (forwardOnSlope < -0.1f)
             {
-                // Uphill
+                ResetDownhillAcceleration();
                 isMovingUphill = true;
-                targetMoveDirection *= uphillSpeedMultiplier;
                 
-                // Ensure minimum uphill movement
-                if (targetMoveDirection.magnitude < moveSpeed * 0.3f)
+                // Use Super Slide uphill multiplier if active
+                float currentUphillMult = isSuperSlideActive ? superSlideUphillMultiplier : uphillSpeedMultiplier;
+                targetMoveDirection *= currentUphillMult;
+                
+                if (targetMoveDirection.magnitude < currentMoveSpeed * 0.3f)
                 {
-                    targetMoveDirection = adjustedInputDir.normalized * (moveSpeed * uphillSpeedMultiplier);
+                    targetMoveDirection = adjustedInputDir.normalized * (currentMoveSpeed * currentUphillMult);
                 }
+            }
+            else
+            {
+                ResetDownhillAcceleration();
             }
             
             slopeDirectionDot = forwardOnSlope;
         }
-        else if (isSkating && isOnSlope && inputDir.magnitude <= 0.1f)
+        else if (!isSuperGlideActive && isSkating && isOnSlope && inputDir.magnitude <= 0.1f)
         {
-            // Auto-slide downhill
             isMovingDownhill = true;
-            float autoSlideForce = Mathf.Clamp01(currentSlopeAngle / 45f) * downhillForce * 0.5f;
+            
+            // Use Super Slide settings if active
+            float currentDownhillMult = isSuperSlideActive ? superSlideDownhillMultiplier * 0.8f : downhillSpeedMultiplier * 0.8f;
+            float currentSlideForce = isSuperSlideActive ? superSlideForce : downhillForce;
+            
+            if (downhillAccelerationTime > 0)
+            {
+                downhillAccelerationTimer += Time.deltaTime;
+                float progress = Mathf.Clamp01(downhillAccelerationTimer / downhillAccelerationTime);
+                currentDownhillMultiplier = Mathf.Lerp(0.5f, currentDownhillMult, progress);
+            }
+            else
+            {
+                currentDownhillMultiplier = currentDownhillMult;
+            }
+            
+            float autoSlideForce = Mathf.Clamp01(currentSlopeAngle / 45f) * currentSlideForce * currentDownhillMultiplier;
             targetMoveDirection += downhillDirection * autoSlideForce * Time.deltaTime;
         }
         
-        // Prevent complete stop on uphill
-        if (inputDir.magnitude > 0.1f && targetMoveDirection.magnitude < moveSpeed * 0.1f && isOnSlope)
+        // Prevent complete stop on uphill (doesn't apply to super glide)
+        if (!isSuperGlideActive && inputDir.magnitude > 0.1f && targetMoveDirection.magnitude < currentMoveSpeed * 0.1f && isOnSlope)
         {
-            targetMoveDirection = adjustedInputDir * (moveSpeed * uphillSpeedMultiplier * 0.5f);
+            float currentUphillMult = isSuperSlideActive ? superSlideUphillMultiplier : uphillSpeedMultiplier;
+            targetMoveDirection = adjustedInputDir * (currentMoveSpeed * currentUphillMult * 0.5f);
         }
         
-        // Smooth movement
-        moveDirection = Vector3.Lerp(moveDirection, targetMoveDirection, Time.deltaTime / lerpTime);
-
-        // Rotation
-        if (adjustedInputDir.magnitude > 0.01f)
+        // Smooth movement direction
+        float movementLerpTime = 0.1f; // Default
+        if (isSuperGlideActive)
         {
-            float targetAngle = Mathf.Atan2(adjustedInputDir.x, adjustedInputDir.z) * Mathf.Rad2Deg;
+            movementLerpTime = superGlideAccelerationTime;
+        }
+        else if (isGlideActive)
+        {
+            movementLerpTime = glideAccelerationTime;
+        }
+        
+        moveDirection = Vector3.Lerp(moveDirection, targetMoveDirection, Time.deltaTime / movementLerpTime);
+
+        // Store velocity for Glide if needed
+        if (isGlideActive && glideUsesVelocity)
+        {
+            glideVelocity = moveDirection * 0.3f;
+        }
+        else if (!isGlideActive)
+        {
+            glideVelocity = Vector3.zero;
+        }
+
+        // Rotation - Rotate to face movement direction
+        if ((!isGlideActive && !isSuperGlideActive && adjustedInputDir.magnitude > 0.01f) || 
+            (isGlideActive && adjustedInputDir.magnitude > 0.01f))
+        {
+            float targetAngle;
+            
+            if (isRunActive && !isGlideActive) // Only force camera direction when running (not gliding)
+            {
+                // When running, rotate to face camera forward direction
+                targetAngle = Mathf.Atan2(camForward.x, camForward.z) * Mathf.Rad2Deg;
+            }
+            else
+            {
+                // When gliding or using WASD, rotate to face movement direction
+                targetAngle = Mathf.Atan2(adjustedInputDir.x, adjustedInputDir.z) * Mathf.Rad2Deg;
+            }
+            
+            float angle = Mathf.SmoothDampAngle(transform.eulerAngles.y, targetAngle, ref rotationVelocity, 0.05f);
+            transform.rotation = Quaternion.Euler(0f, angle, 0f);
+        }
+        // For Super Glide, always face camera forward direction
+        else if (isSuperGlideActive)
+        {
+            float targetAngle = Mathf.Atan2(camForward.x, camForward.z) * Mathf.Rad2Deg;
             float angle = Mathf.SmoothDampAngle(transform.eulerAngles.y, targetAngle, ref rotationVelocity, 0.05f);
             transform.rotation = Quaternion.Euler(0f, angle, 0f);
         }
@@ -404,12 +761,110 @@ public class Run : MonoBehaviour
         controller.Move(finalVelocity * Time.deltaTime);
     }
 
+    private void ActivateGlide()
+    {
+        // Safety check: Don't activate if grounded
+        if (isGrounded || controller.isGrounded)
+        {
+            return;
+        }
+        
+        // CANCEL JUMP FORCE: Immediately reduce upward velocity
+        if (velocityY > 0)
+        {
+            velocityY = velocityY * 0.2f; // Reduce to 20% of current upward velocity
+            isJumping = false; // Stop the jump state
+        }
+        
+        isGlideActive = true;
+        
+        // Calculate target glide speed based on current movement state
+        float baseSpeed = isRunActive ? runSpeed : walkSpeed;
+        targetGlideSpeed = baseSpeed * glideSpeedMultiplier;
+        glideCurrentSpeed = Mathf.Max(currentMoveSpeed, targetGlideSpeed * 0.5f);
+        
+        if (glideUsesVelocity)
+        {
+            glideVelocity = moveDirection * 0.5f;
+        }
+    }
+
+    private void DeactivateGlide()
+    {
+        isGlideActive = false;
+        glideVelocity = Vector3.zero;
+        glideCurrentSpeed = 0f;
+        glideSpeedSmoothVelocity = 0f;
+        targetGlideSpeed = 0f;
+    }
+
+    private void ActivateSuperGlide()
+    {
+        // Safety check: Don't activate if grounded
+        if (isGrounded || controller.isGrounded)
+        {
+            return;
+        }
+        
+        // CANCEL JUMP FORCE: Immediately reduce upward velocity
+        if (velocityY > 0)
+        {
+            velocityY = velocityY * 0.1f; // Reduce to 10% of current upward velocity (stronger cancel)
+            isJumping = false; // Stop the jump state
+        }
+        
+        isSuperGlideActive = true;
+        superGlideAccelerationTimer = 0f;
+        currentSuperGlideMultiplier = superGlideSpeedMultiplier;
+        
+        // Calculate initial super glide speed based on current movement state
+        float baseSpeed = isRunActive ? runSpeed : walkSpeed;
+        targetSuperGlideSpeed = baseSpeed * currentSuperGlideMultiplier;
+        superGlideCurrentSpeed = Mathf.Max(currentMoveSpeed, targetSuperGlideSpeed * 0.5f);
+        
+        // Deactivate normal glide if active
+        if (isGlideActive)
+        {
+            DeactivateGlide();
+        }
+    }
+
+    private void DeactivateSuperGlide()
+    {
+        isSuperGlideActive = false;
+        superGlideCurrentSpeed = 0f;
+        superGlideSpeedSmoothVelocity = 0f;
+        targetSuperGlideSpeed = 0f;
+        superGlideAccelerationTimer = 0f;
+        currentSuperGlideMultiplier = 1.0f;
+    }
+
     private IEnumerator PerformDash()
     {
         isDashing = true;
         dashCooldownTimer = dashCooldown;
 
-        Vector3 dashDir = transform.forward;
+        // Dash in camera's forward direction
+        Vector3 camForward = Vector3.Scale(playerCamera.forward, new Vector3(1, 0, 1)).normalized;
+        Vector3 camRight = Vector3.Scale(playerCamera.right, new Vector3(1, 0, 1)).normalized;
+        
+        // Get current input for dash direction
+        float h = Input.GetAxisRaw("Horizontal");
+        float v = Input.GetAxisRaw("Vertical");
+        
+        Vector3 dashDir;
+        if (Mathf.Abs(h) > 0.1f || Mathf.Abs(v) > 0.1f)
+        {
+            // Dash in input direction
+            dashDir = (camRight * h + camForward * v).normalized;
+        }
+        else
+        {
+            // Dash in camera forward direction if no input
+            dashDir = camForward;
+        }
+        
+        dashDirection = dashDir; // Store for rotation
         dashVelocity = dashDir * (dashDistance / dashDuration);
 
         float originalGravity = gravity;
@@ -422,6 +877,19 @@ public class Run : MonoBehaviour
         isDashing = false;
         moveDirection = Vector3.zero;
         velocityY = 0f;
+        ResetDownhillAcceleration();
+        currentMoveSpeed = walkSpeed;
+        runSpeedSmoothVelocity = 0f;
+        
+        // Reset glide speeds
+        glideCurrentSpeed = 0f;
+        glideSpeedSmoothVelocity = 0f;
+        superGlideCurrentSpeed = 0f;
+        superGlideSpeedSmoothVelocity = 0f;
+        targetGlideSpeed = 0f;
+        targetSuperGlideSpeed = 0f;
+        superGlideAccelerationTimer = 0f;
+        currentSuperGlideMultiplier = 1.0f;
     }
 
     private void OnControllerColliderHit(ControllerColliderHit hit)
