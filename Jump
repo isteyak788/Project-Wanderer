@@ -1,0 +1,517 @@
+using UnityEngine;
+
+public class Jump : MonoBehaviour
+{
+    [Header("Jump Settings")]
+    [SerializeField] private float minJumpHeight = 1f; // Height for quick tap
+    [SerializeField] private float maxJumpHeight = 4f; // Height for full hold
+    [SerializeField] private float jumpDuration = 0.5f; // How long to hold for max height
+    [SerializeField] private int jumpAmount = 2;
+    [SerializeField] private float gravity = -30f;
+    [SerializeField] private float coyoteTime = 0.2f;
+    
+    [Header("Fall Settings")]
+    [SerializeField] private float fallGravityMultiplier = 2f;
+    [SerializeField] private AnimationCurve fallGravityCurve = AnimationCurve.Linear(0f, 1f, 1f, 3f);
+    [SerializeField] private float maxFallSpeed = -25f;
+    [SerializeField] private float fastFallMultiplier = 3f;
+    [SerializeField] private KeyCode fastFallKey = KeyCode.S;
+    
+    [Header("Jump Apex Settings")]
+    [SerializeField] private float apexGravityMultiplier = 0.5f;
+    [SerializeField] private float apexThreshold = 0.1f;
+    
+    [Header("Jump Input")]
+    [SerializeField] private KeyCode jumpKey = KeyCode.Space;
+    
+    [Header("Glide Settings")]
+    [SerializeField] private float glideGravityMultiplier = 0.3f;
+    [SerializeField] private KeyCode glideKey = KeyCode.LeftShift;
+    [SerializeField] private float maxGlideFallSpeed = -5f;
+    [SerializeField] private float superGlideMultiplier = 0.1f;
+    [SerializeField] private KeyCode superGlideKey = KeyCode.LeftControl;
+
+    [Header("Ground Detection")]
+    [SerializeField] private Transform groundCheck;
+    [SerializeField] private LayerMask groundLayer;
+    [SerializeField] private float groundCheckRadius = 0.3f;
+
+    // Components
+    private CharacterController controller;
+    private float verticalVelocity;
+
+    // State variables
+    private int jumpsRemaining;
+    private int totalJumpsUsed = 0;
+    private float coyoteTimeCounter;
+    private bool isGrounded;
+    private bool wasGrounded;
+    private bool isJumping = false;
+    private float jumpTimer = 0f;
+    private float peakHeight = 0f;
+    private bool hasReachedPeak = false;
+    private float timeSincePeak = 0f;
+    
+    // Jump physics
+    private float minJumpForce;
+    private float maxJumpForce;
+    private float additionalForcePerSecond;
+    
+    // ===== PUBLIC STATE FLAGS (Read-Only for other scripts) =====
+    
+    // Jump States
+    public bool IsJumping { get; private set; } = false;
+    public bool IsSingleJumping { get; private set; } = false;
+    public bool IsDoubleJumping { get; private set; } = false;
+    public bool IsTripleJumping { get; private set; } = false;
+    public bool IsMultiJumping { get; private set; } = false;
+    public int CurrentJumpCount { get; private set; } = 0;
+    public int MaxJumpCount { get { return jumpAmount; } }
+    
+    // Fall States
+    public bool IsFalling { get; private set; } = false;
+    public bool IsFastFalling { get; private set; } = false;
+    public bool IsAtApex { get; private set; } = false;
+    
+    // Glide States
+    public bool IsGliding { get; private set; } = false;
+    public bool IsSuperGliding { get; private set; } = false;
+    
+    // Air States
+    public bool IsAirborne { get; private set; } = false;
+    public bool IsAscending { get; private set; } = false;
+    public bool IsDescending { get; private set; } = false;
+    
+    // Ground States
+    public bool IsGroundedState { get { return isGrounded; } }
+    public bool WasGroundedThisFrame { get { return wasGrounded && !isGrounded; } }
+    public bool JustLanded { get { return !wasGrounded && isGrounded; } }
+    
+    // Velocity Info
+    public float VerticalVelocity { get { return verticalVelocity; } }
+    public float PeakHeight { get { return peakHeight; } }
+    public float TimeInAir { get; private set; } = 0f;
+    public float FallDistance { get; private set; } = 0f;
+
+    private void Awake()
+    {
+        controller = GetComponent<CharacterController>();
+        
+        if (controller == null)
+        {
+            controller = GetComponentInParent<CharacterController>();
+        }
+        
+        if (controller == null)
+        {
+            Debug.LogWarning("Jump script: CharacterController not found. Make sure Run script is attached first.");
+        }
+
+        jumpsRemaining = jumpAmount;
+        verticalVelocity = 0f;
+        
+        // Calculate jump forces
+        minJumpForce = Mathf.Sqrt(2 * Mathf.Abs(gravity) * minJumpHeight);
+        maxJumpForce = Mathf.Sqrt(2 * Mathf.Abs(gravity) * maxJumpHeight);
+        
+        // Calculate additional force to add while holding
+        float additionalForceTotal = maxJumpForce - minJumpForce;
+        additionalForcePerSecond = additionalForceTotal / jumpDuration;
+        
+        // Initialize curves if not set
+        if (fallGravityCurve == null || fallGravityCurve.length == 0)
+        {
+            fallGravityCurve = AnimationCurve.Linear(0f, 1f, 1f, 3f);
+        }
+        
+        Debug.Log($"Jump physics: Min force={minJumpForce:F2}, Max force={maxJumpForce:F2}, Additional force/sec={additionalForcePerSecond:F2}");
+    }
+
+    private void Update()
+    {
+        // Skip if no controller
+        if (controller == null)
+        {
+            controller = GetComponent<CharacterController>();
+            if (controller == null) return;
+        }
+
+        // Store previous grounded state
+        wasGrounded = isGrounded;
+
+        // Ground check
+        bool physicsGrounded = Physics.CheckSphere(groundCheck.position, groundCheckRadius, groundLayer);
+        bool controllerGrounded = controller.isGrounded;
+        isGrounded = physicsGrounded || controllerGrounded;
+
+        // Update air time and fall distance
+        UpdateAirStats();
+
+        // Track jump apex and falling state
+        TrackJumpApex();
+
+        // Update all state flags
+        UpdateStateFlags();
+
+        // Handle coyote time
+        if (isGrounded)
+        {
+            coyoteTimeCounter = coyoteTime;
+            if (!wasGrounded)
+            {
+                ResetJumpStates();
+            }
+        }
+        else
+        {
+            coyoteTimeCounter -= Time.deltaTime;
+        }
+
+        // Handle variable jump height with timer
+        HandleVariableJump();
+
+        // Handle glide input
+        HandleGlide();
+
+        // Handle fast fall input
+        HandleFastFall();
+
+        // Handle jump initiation
+        if (Input.GetKeyDown(jumpKey))
+        {
+            if (isGrounded || coyoteTimeCounter > 0)
+            {
+                StartJump();
+                coyoteTimeCounter = 0;
+            }
+            else if (jumpsRemaining > 0)
+            {
+                StartJump();
+            }
+        }
+
+        // Apply gravity with all modifiers
+        ApplyGravity();
+    }
+
+    private void UpdateAirStats()
+    {
+        if (!isGrounded)
+        {
+            TimeInAir += Time.deltaTime;
+            
+            // Track fall distance from peak
+            if (hasReachedPeak)
+            {
+                FallDistance = peakHeight - transform.position.y;
+            }
+        }
+        else
+        {
+            TimeInAir = 0f;
+            FallDistance = 0f;
+        }
+    }
+
+    private void TrackJumpApex()
+    {
+        if (!isGrounded)
+        {
+            // Track the highest point reached
+            if (verticalVelocity > 0)
+            {
+                peakHeight = transform.position.y;
+                hasReachedPeak = false;
+                timeSincePeak = 0f;
+            }
+            else if (verticalVelocity <= 0 && !hasReachedPeak)
+            {
+                hasReachedPeak = true;
+                timeSincePeak = 0f;
+            }
+            
+            if (hasReachedPeak)
+            {
+                timeSincePeak += Time.deltaTime;
+            }
+        }
+    }
+
+    private void UpdateStateFlags()
+    {
+        // Airborne states
+        IsAirborne = !isGrounded;
+        IsAscending = !isGrounded && verticalVelocity > 0;
+        IsDescending = !isGrounded && verticalVelocity < 0;
+        
+        // Falling states
+        IsFalling = IsDescending;
+        IsAtApex = !isGrounded && Mathf.Abs(verticalVelocity) < apexThreshold;
+        
+        // Jump type states
+        IsSingleJumping = IsJumping && CurrentJumpCount == 1;
+        IsDoubleJumping = IsJumping && CurrentJumpCount == 2;
+        IsTripleJumping = IsJumping && CurrentJumpCount == 3;
+        IsMultiJumping = IsJumping && CurrentJumpCount > 1;
+    }
+
+    private void HandleVariableJump()
+    {
+        if (isJumping)
+        {
+            // Apply additional upward force while holding jump AND timer hasn't expired
+            if (Input.GetKey(jumpKey) && jumpTimer < jumpDuration)
+            {
+                // Update jump timer
+                jumpTimer += Time.deltaTime;
+                
+                // Calculate how much additional force to apply this frame
+                float additionalForceThisFrame = additionalForcePerSecond * Time.deltaTime;
+                
+                // Only apply if we're still moving upward
+                if (verticalVelocity > 0)
+                {
+                    verticalVelocity += additionalForceThisFrame;
+                    
+                    // Clamp to max velocity
+                    verticalVelocity = Mathf.Min(verticalVelocity, maxJumpForce);
+                }
+                
+                Debug.Log($"Jump boost: Timer={jumpTimer:F2}/{jumpDuration}, Velocity={verticalVelocity:F2}/{maxJumpForce:F2}");
+            }
+            
+            // Check if jump should end (started falling)
+            if (verticalVelocity <= 0)
+            {
+                isJumping = false;
+                IsJumping = false;
+                Debug.Log("Jump ended - started falling");
+            }
+        }
+        
+        // Stop adding force if player releases the key early
+        if (Input.GetKeyUp(jumpKey) && isJumping)
+        {
+            isJumping = false;
+            IsJumping = false;
+            Debug.Log("Jump force stopped (key released)");
+        }
+    }
+
+    private void HandleGlide()
+    {
+        bool wantsToGlide = Input.GetKey(glideKey) && !isGrounded;
+        bool wantsSuperGlide = Input.GetKey(superGlideKey) && !isGrounded;
+        
+        if ((wantsToGlide || wantsSuperGlide) && !IsGliding && !IsSuperGliding)
+        {
+            IsGliding = wantsToGlide;
+            IsSuperGliding = wantsSuperGlide;
+            
+            // Cancel jump when starting to glide
+            isJumping = false;
+            IsJumping = false;
+            
+            if (verticalVelocity < 0)
+            {
+                float reductionMultiplier = IsSuperGliding ? 0.2f : 0.4f;
+                float maxSpeed = IsSuperGliding ? maxGlideFallSpeed * 0.5f : maxGlideFallSpeed;
+                verticalVelocity = Mathf.Max(verticalVelocity * reductionMultiplier, maxSpeed);
+            }
+        }
+        else if ((!wantsToGlide || !wantsSuperGlide) && (IsGliding || IsSuperGliding))
+        {
+            IsGliding = false;
+            IsSuperGliding = false;
+        }
+    }
+
+    private void HandleFastFall()
+    {
+        // Fast fall when pressing down while airborne
+        if (!isGrounded && !IsGliding && !IsSuperGliding && Input.GetKey(fastFallKey) && verticalVelocity < 0)
+        {
+            IsFastFalling = true;
+            // Apply extra downward force
+            verticalVelocity += gravity * (fastFallMultiplier - 1f) * Time.deltaTime;
+        }
+        else
+        {
+            IsFastFalling = false;
+        }
+    }
+
+    private void ApplyGravity()
+    {
+        if (!isGrounded)
+        {
+            float currentGravity = gravity;
+            
+            // 1. Check for jump apex (moment of weightlessness at peak)
+            if (Mathf.Abs(verticalVelocity) < apexThreshold && !hasReachedPeak)
+            {
+                currentGravity *= apexGravityMultiplier;
+            }
+            // 2. Apply gliding gravity
+            else if (IsGliding || IsSuperGliding)
+            {
+                float glideMultiplier = IsSuperGliding ? superGlideMultiplier : glideGravityMultiplier;
+                currentGravity *= glideMultiplier;
+                
+                float maxSpeed = IsSuperGliding ? maxGlideFallSpeed * 0.5f : maxGlideFallSpeed;
+                if (verticalVelocity < maxSpeed)
+                {
+                    verticalVelocity = Mathf.Lerp(verticalVelocity, maxSpeed, Time.deltaTime * 2f);
+                }
+            }
+            // 3. Apply falling gravity with curve
+            else if (verticalVelocity < 0)
+            {
+                // Use fall curve based on time since peak
+                float fallProgress = Mathf.Clamp01(timeSincePeak / 2f);
+                float curveMultiplier = fallGravityCurve.Evaluate(fallProgress);
+                currentGravity *= curveMultiplier;
+                
+                // Cap maximum fall speed
+                if (verticalVelocity < maxFallSpeed)
+                {
+                    verticalVelocity = Mathf.Lerp(verticalVelocity, maxFallSpeed, Time.deltaTime);
+                }
+            }
+
+            // Apply gravity
+            verticalVelocity += currentGravity * Time.deltaTime;
+        }
+        else if (verticalVelocity < 0)
+        {
+            verticalVelocity = -2f;
+        }
+    }
+
+    private void StartJump()
+    {
+        // Reset jump timer
+        jumpTimer = 0f;
+        
+        // Start tracking jump state
+        isJumping = true;
+        IsJumping = true;
+        
+        // Apply initial minimum jump force
+        verticalVelocity = minJumpForce;
+        
+        // Update jumps remaining
+        jumpsRemaining--;
+        
+        // Update jump count
+        CurrentJumpCount = jumpAmount - jumpsRemaining;
+        totalJumpsUsed++;
+        
+        // Stop gliding if active
+        if (IsGliding || IsSuperGliding)
+        {
+            IsGliding = false;
+            IsSuperGliding = false;
+        }
+        
+        // Reset peak tracking
+        peakHeight = transform.position.y;
+        hasReachedPeak = false;
+        timeSincePeak = 0f;
+        
+        Debug.Log($"Jump started! Initial velocity: {minJumpForce:F2} (min height: {minJumpHeight}), " +
+                 $"Can add up to: {maxJumpForce - minJumpForce:F2} more over {jumpDuration}s, " +
+                 $"Jump count: {CurrentJumpCount}");
+    }
+
+    private void ResetJumpStates()
+    {
+        jumpsRemaining = jumpAmount;
+        totalJumpsUsed = 0;
+        CurrentJumpCount = 0;
+        
+        if (IsGliding) IsGliding = false;
+        if (IsSuperGliding) IsSuperGliding = false;
+        
+        isJumping = false;
+        IsJumping = false;
+        jumpTimer = 0f;
+        peakHeight = transform.position.y;
+        hasReachedPeak = false;
+        timeSincePeak = 0f;
+        IsFastFalling = false;
+    }
+
+    private void OnDrawGizmosSelected()
+    {
+        if (groundCheck != null)
+        {
+            Gizmos.color = isGrounded ? Color.green : Color.red;
+            Gizmos.DrawWireSphere(groundCheck.position, groundCheckRadius);
+        }
+    }
+
+    // ===== PUBLIC METHODS FOR OTHER SCRIPTS =====
+    
+    // Setters
+    public void SetJumpAmount(int amount)
+    {
+        jumpAmount = amount;
+        if (isGrounded) jumpsRemaining = jumpAmount;
+    }
+    public void SetJumpKey(KeyCode key) => jumpKey = key;
+    public void SetGlideKey(KeyCode key) => glideKey = key;
+    public void SetFallCurve(AnimationCurve curve) => fallGravityCurve = curve;
+    
+    // Getters for specific states
+    public bool IsPerformingJump() => IsJumping;
+    public bool IsPerformingGlide() => IsGliding || IsSuperGliding;
+    public bool IsInAir() => IsAirborne;
+    public bool IsMovingUpward() => IsAscending;
+    public bool IsMovingDownward() => IsDescending;
+    public bool CanJump() => jumpsRemaining > 0 || isGrounded || coyoteTimeCounter > 0;
+    public int GetRemainingJumps() => jumpsRemaining;
+    
+    // FIXED: Added GetVerticalVelocity() method for Run script compatibility
+    public float GetVerticalVelocity() => verticalVelocity;
+    
+    // FIXED: Added SetVerticalVelocity() method for Run script compatibility
+    public void SetVerticalVelocity(float newVelocity) => verticalVelocity = newVelocity;
+    
+    // Force methods for external control
+    public void AddJumpForce(float force)
+    {
+        verticalVelocity += force;
+        if (force > 0) IsJumping = true;
+    }
+    
+    public void CancelJump()
+    {
+        if (verticalVelocity > 0) verticalVelocity = 0;
+        IsJumping = false;
+        isJumping = false;
+    }
+    
+    public void CancelGlide()
+    {
+        IsGliding = false;
+        IsSuperGliding = false;
+    }
+    
+    public void ForceFall()
+    {
+        if (verticalVelocity > -5f) verticalVelocity = -5f;
+        IsJumping = false;
+        isJumping = false;
+        CancelGlide();
+    }
+    
+    // Event triggers for other scripts
+    public System.Action OnJumpStarted;
+    public System.Action OnJumpEnded;
+    public System.Action OnGlideStarted;
+    public System.Action OnGlideEnded;
+    public System.Action OnLanded;
+    public System.Action OnFalling;
+    public System.Action OnFastFalling;
+}
