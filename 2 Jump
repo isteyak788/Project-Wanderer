@@ -1,0 +1,504 @@
+using UnityEngine;
+
+[RequireComponent(typeof(CharacterController))]
+public class _2Jump : MonoBehaviour
+{
+    [Header("Jump Settings")]
+    [SerializeField] private float jumpHeight = 3f;
+    [SerializeField] private float minJumpHeight = 1f;
+    [SerializeField] private float jumpTime = 0.35f;
+    [SerializeField] private float baseGravity = -15f;
+    [SerializeField] private int maxJumps = 2;
+    [SerializeField] private bool resetJumpsOnGround = true;
+    [SerializeField] private float coyoteTime = 0.1f;
+    
+    [Header("Glide Settings")]
+    [SerializeField] private float glideGravityMultiplier = 0.3f;
+    [SerializeField] private float glideStartHeight = 5f;
+    [SerializeField] private KeyCode glideKey = KeyCode.LeftShift;
+    [SerializeField] private bool canGlideAfterJump = true; // NEW: Allow gliding right after jump
+    [SerializeField] private float glideDelayAfterJump = 0.1f; // NEW: Small delay before glide can start
+    
+    [Header("Ground Check")]
+    [SerializeField] private Transform groundCheck;
+    [SerializeField] private float groundCheckRadius = 0.2f;
+    [SerializeField] private float groundCheckOffset = 0.1f;
+    [SerializeField] private LayerMask groundLayer;
+    
+    // Component References
+    private CharacterController characterController;
+    
+    // Movement & Jump State
+    private Vector3 velocity;
+    private Vector3 horizontalVelocity;
+    private bool isGrounded;
+    private bool isJumping;
+    private bool isGliding;
+    private float jumpTimeCounter;
+    private float currentGravity;
+    
+    // Jump Amount Tracking
+    private int jumpsRemaining;
+    private float coyoteTimeCounter;
+    private bool wasGrounded;
+    
+    // NEW: Glide transition tracking
+    private float timeSinceLastJump;
+    private float timeSinceJumpEnded;
+    private bool wasJumping;
+    
+    void Start()
+    {
+        characterController = GetComponent<CharacterController>();
+        currentGravity = baseGravity;
+        jumpsRemaining = maxJumps;
+        
+        if (characterController == null)
+        {
+            Debug.LogError("CharacterController component not found! Please add one to the GameObject.");
+        }
+        
+        if (groundCheck == null)
+        {
+            Debug.LogError("Ground Check transform not assigned! Please assign in the inspector.");
+            groundCheck = transform;
+        }
+    }
+
+    void Update()
+    {
+        // Store previous ground state for coyote time
+        wasGrounded = isGrounded;
+        wasJumping = isJumping; // Track previous jump state
+        
+        // Check if grounded
+        CheckGround();
+        
+        // Update coyote time
+        UpdateCoyoteTime();
+        
+        // Update timers
+        UpdateTimers();
+        
+        // Handle variable jump
+        HandleVariableJump();
+        
+        // Handle gliding
+        HandleGliding();
+        
+        // Apply gravity
+        ApplyGravity();
+        
+        // Handle falling momentum
+        HandleFallingMomentum();
+        
+        // Move the character
+        MoveCharacter();
+    }
+
+    void CheckGround()
+    {
+        // Sphere cast for ground detection
+        Vector3 checkPosition = groundCheck.position + Vector3.down * groundCheckOffset;
+        isGrounded = Physics.CheckSphere(checkPosition, groundCheckRadius, groundLayer);
+        
+        // Reset vertical velocity when grounded
+        if (isGrounded && velocity.y < 0)
+        {
+            velocity.y = -2f; // Small downward force to keep character grounded
+            isJumping = false;
+            isGliding = false;
+            currentGravity = baseGravity;
+            
+            // Reset jumps when grounded if enabled
+            if (resetJumpsOnGround)
+            {
+                jumpsRemaining = maxJumps;
+            }
+        }
+        
+        // If just left the ground, start coyote time
+        if (wasGrounded && !isGrounded)
+        {
+            coyoteTimeCounter = coyoteTime;
+        }
+    }
+
+    void UpdateCoyoteTime()
+    {
+        if (coyoteTimeCounter > 0)
+        {
+            coyoteTimeCounter -= Time.deltaTime;
+        }
+    }
+
+    void UpdateTimers()
+    {
+        // Update time since last jump
+        if (isJumping)
+        {
+            timeSinceLastJump = 0f;
+        }
+        else if (wasJumping && !isJumping)
+        {
+            // Just stopped jumping
+            timeSinceJumpEnded = 0f;
+        }
+        else
+        {
+            timeSinceLastJump += Time.deltaTime;
+            timeSinceJumpEnded += Time.deltaTime;
+        }
+    }
+
+    void HandleVariableJump()
+    {
+        // Check if we can jump (grounded, in coyote time, or have jumps remaining)
+        bool canJump = (isGrounded || coyoteTimeCounter > 0 || jumpsRemaining > 0);
+        
+        // Start jump when space is pressed and we can jump
+        if (Input.GetKeyDown(KeyCode.Space) && canJump)
+        {
+            // Consume coyote time if used
+            if (coyoteTimeCounter > 0 && !isGrounded)
+            {
+                coyoteTimeCounter = 0;
+            }
+            
+            StartJump();
+        }
+        
+        // Variable jump height: maintain jump while space is held
+        if (Input.GetKey(KeyCode.Space) && isJumping)
+        {
+            ContinueJump();
+        }
+        
+        // Cancel jump when space is released
+        if (Input.GetKeyUp(KeyCode.Space))
+        {
+            CancelJump();
+        }
+    }
+
+    void HandleGliding()
+    {
+        // Check if we can glide
+        bool canGlide = CanGlide();
+        
+        // Start gliding when glide key is pressed and we can glide
+        if (Input.GetKeyDown(glideKey) && canGlide && !isGliding)
+        {
+            StartGliding();
+        }
+        
+        // Continue gliding while key is held
+        if (Input.GetKey(glideKey) && isGliding)
+        {
+            ContinueGliding();
+        }
+        
+        // Stop gliding when key is released or conditions change
+        if ((Input.GetKeyUp(glideKey) && isGliding) || isGrounded)
+        {
+            StopGliding();
+        }
+    }
+
+    bool CanGlide()
+    {
+        // Can't glide if grounded
+        if (isGrounded) return false;
+        
+        // Check if falling (or can glide even when not falling)
+        bool isFalling = velocity.y < 0;
+        
+        // Allow gliding if:
+        // 1. We're falling OR we're allowing glide after jump
+        // 2. We're above minimum height (if glideStartHeight > 0)
+        // 3. We're not currently jumping (or we allow transition from jump)
+        
+        bool heightCheck = glideStartHeight <= 0 || transform.position.y >= glideStartHeight;
+        
+        // Check jump-to-glide transition
+        bool canTransitionFromJump = canGlideAfterJump && 
+                                   (!isJumping || timeSinceLastJump > glideDelayAfterJump);
+        
+        return (isFalling || canGlideAfterJump) && 
+               heightCheck && 
+               canTransitionFromJump &&
+               !isGliding;
+    }
+
+    void HandleFallingMomentum()
+    {
+        // If falling and not gliding, remove horizontal momentum
+        if (!isGrounded && velocity.y < 0 && !isGliding && !isJumping)
+        {
+            horizontalVelocity = Vector3.Lerp(horizontalVelocity, Vector3.zero, Time.deltaTime * 5f);
+        }
+        
+        // If gliding, allow some horizontal control
+        if (isGliding)
+        {
+            float horizontalInput = Input.GetAxis("Horizontal");
+            horizontalVelocity = new Vector3(horizontalInput * 5f, 0, 0);
+        }
+    }
+
+    void StartJump()
+    {
+        isJumping = true;
+        isGliding = false; // Cancel any active gliding when jumping
+        jumpTimeCounter = jumpTime;
+        currentGravity = baseGravity;
+        
+        // Calculate initial jump velocity
+        float initialJumpVelocity = Mathf.Sqrt(jumpHeight * -2f * baseGravity);
+        velocity.y = initialJumpVelocity;
+        
+        // Reset horizontal velocity when jumping
+        horizontalVelocity = Vector3.zero;
+        
+        // Decrease jump counter
+        if (!isGrounded && coyoteTimeCounter <= 0)
+        {
+            jumpsRemaining--;
+        }
+        else if (isGrounded)
+        {
+            // If grounded, consume one jump
+            jumpsRemaining--;
+        }
+        
+        // Reset coyote time
+        coyoteTimeCounter = 0;
+        
+        // Reset glide transition timers
+        timeSinceLastJump = 0f;
+    }
+
+    void ContinueJump()
+    {
+        if (jumpTimeCounter > 0)
+        {
+            float jumpProgress = jumpTimeCounter / jumpTime;
+            float additionalForce = Mathf.Sqrt(jumpHeight * -2f * baseGravity) * 0.5f * jumpProgress;
+            velocity.y = Mathf.Max(velocity.y, additionalForce);
+            jumpTimeCounter -= Time.deltaTime;
+        }
+        else
+        {
+            isJumping = false;
+        }
+    }
+
+    void CancelJump()
+    {
+        isJumping = false;
+        
+        float minJumpVelocity = Mathf.Sqrt(minJumpHeight * -2f * baseGravity);
+        
+        if (velocity.y > minJumpVelocity)
+        {
+            velocity.y = minJumpVelocity;
+        }
+    }
+
+    void StartGliding()
+    {
+        isGliding = true;
+        isJumping = false; // Ensure we're not jumping when gliding
+        
+        currentGravity = baseGravity * glideGravityMultiplier;
+        horizontalVelocity = Vector3.zero;
+        
+        // Set a gentle downward velocity for gliding
+        // If still moving upward from jump, gradually transition
+        if (velocity.y > 0)
+        {
+            velocity.y = Mathf.Lerp(velocity.y, -3f, Time.deltaTime * 10f);
+        }
+        else
+        {
+            velocity.y = Mathf.Max(velocity.y, -3f);
+        }
+    }
+
+    void ContinueGliding()
+    {
+        currentGravity = baseGravity * glideGravityMultiplier;
+        
+        // Maintain a controlled falling speed
+        velocity.y = Mathf.Max(velocity.y, -4f);
+        
+        // Smooth transition if still has upward momentum
+        if (velocity.y > -2f)
+        {
+            velocity.y = Mathf.Lerp(velocity.y, -3f, Time.deltaTime * 5f);
+        }
+    }
+
+    void StopGliding()
+    {
+        isGliding = false;
+        currentGravity = baseGravity;
+        horizontalVelocity = Vector3.zero;
+    }
+
+    void ApplyGravity()
+    {
+        if (!isGrounded)
+        {
+            velocity.y += currentGravity * Time.deltaTime;
+            
+            float terminalVelocity = isGliding ? -10f : -20f;
+            velocity.y = Mathf.Max(velocity.y, terminalVelocity);
+        }
+    }
+
+    void MoveCharacter()
+    {
+        Vector3 finalVelocity = new Vector3(horizontalVelocity.x, velocity.y, horizontalVelocity.z);
+        
+        if (characterController != null)
+        {
+            characterController.Move(finalVelocity * Time.deltaTime);
+        }
+    }
+
+    // ========== PUBLIC METHODS ==========
+
+    public void PerformJump()
+    {
+        bool canJump = (isGrounded || coyoteTimeCounter > 0 || jumpsRemaining > 0);
+        
+        if (canJump)
+        {
+            StartJump();
+        }
+    }
+
+    public void AddJump()
+    {
+        jumpsRemaining = Mathf.Min(jumpsRemaining + 1, maxJumps);
+    }
+
+    public void ResetJumps()
+    {
+        jumpsRemaining = maxJumps;
+    }
+
+    public void SetMaxJumps(int newMaxJumps)
+    {
+        maxJumps = newMaxJumps;
+        jumpsRemaining = Mathf.Min(jumpsRemaining, maxJumps);
+    }
+
+    public int GetJumpsRemaining()
+    {
+        return jumpsRemaining;
+    }
+
+    public int GetMaxJumps()
+    {
+        return maxJumps;
+    }
+
+    public void ToggleGlide(bool enable)
+    {
+        if (enable && CanGlide())
+        {
+            StartGliding();
+        }
+        else if (!enable && isGliding)
+        {
+            StopGliding();
+        }
+    }
+
+    // NEW: Force start gliding regardless of conditions
+    public void ForceStartGlide()
+    {
+        if (!isGrounded && !isGliding)
+        {
+            StartGliding();
+        }
+    }
+
+    public void SetHorizontalVelocity(Vector3 newVelocity)
+    {
+        if (isGrounded || isGliding || isJumping)
+        {
+            horizontalVelocity = new Vector3(newVelocity.x, 0, newVelocity.z);
+        }
+    }
+
+    public void StopAllMomentum()
+    {
+        horizontalVelocity = Vector3.zero;
+        if (!isJumping && !isGliding)
+        {
+            velocity.y = 0;
+        }
+    }
+
+    public bool IsGrounded()
+    {
+        return isGrounded;
+    }
+
+    public bool IsJumping()
+    {
+        return isJumping;
+    }
+
+    public bool IsGliding()
+    {
+        return isGliding;
+    }
+
+    public bool IsFalling()
+    {
+        return !isGrounded && velocity.y < 0 && !isJumping;
+    }
+
+    public bool CanJump()
+    {
+        return (isGrounded || coyoteTimeCounter > 0 || jumpsRemaining > 0);
+    }
+
+    // NEW: Check if can glide
+    public bool CanGlideNow()
+    {
+        return CanGlide();
+    }
+
+    public float GetCurrentGravity()
+    {
+        return currentGravity;
+    }
+
+    public Vector3 GetVelocity()
+    {
+        return new Vector3(horizontalVelocity.x, velocity.y, horizontalVelocity.z);
+    }
+
+    // Draw ground check gizmo in editor
+    void OnDrawGizmosSelected()
+    {
+        if (groundCheck != null)
+        {
+            Gizmos.color = isGrounded ? Color.green : Color.red;
+            Vector3 checkPosition = groundCheck.position + Vector3.down * groundCheckOffset;
+            Gizmos.DrawWireSphere(checkPosition, groundCheckRadius);
+            
+            // Visualize glide state
+            if (isGliding)
+            {
+                Gizmos.color = Color.cyan;
+                Gizmos.DrawWireSphere(transform.position, 0.5f);
+            }
+        }
+    }
+}
