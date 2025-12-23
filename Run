@@ -79,20 +79,10 @@ public class Run : MonoBehaviour
     private bool isRunActive = false;
     private float runSpeedSmoothVelocity;
 
-    // Reference to Jump script
-    private Jump jumpScript;
-
     private void Awake()
     {
         controller = GetComponent<CharacterController>();
         currentMoveSpeed = walkSpeed;
-        
-        // Get the Jump script if it exists
-        jumpScript = GetComponent<Jump>();
-        if (jumpScript == null)
-        {
-            Debug.LogWarning("Run script: Jump script not found on the same GameObject. Make sure Jump script is attached.");
-        }
     }
 
     private void Update()
@@ -144,7 +134,7 @@ public class Run : MonoBehaviour
         if (dashDirection != Vector3.zero)
         {
             float targetAngle = Mathf.Atan2(dashDirection.x, dashDirection.z) * Mathf.Rad2Deg;
-            float angle = Mathf.SmoothDampAngle(transform.eulerAngles.y, targetAngle, ref runSpeedSmoothVelocity, 0.05f);
+            float angle = Mathf.SmoothDampAngle(transform.eulerAngles.y, targetAngle, ref rotationVelocity, 0.05f);
             transform.rotation = Quaternion.Euler(0f, angle, 0f);
         }
     }
@@ -337,15 +327,14 @@ public class Run : MonoBehaviour
         }
         
         // Smooth movement direction
-        float movementLerpTime = 0.1f;
-        moveDirection = Vector3.Lerp(moveDirection, targetMoveDirection, Time.deltaTime / movementLerpTime);
+        moveDirection = Vector3.Lerp(moveDirection, targetMoveDirection, Time.deltaTime / accelerationTime);
 
         // Rotation - Rotate to face movement direction
         if (adjustedInputDir.magnitude > 0.01f)
         {
             float targetAngle;
             
-            if (isRunActive) // Only force camera direction when running
+            if (isRunActive)
             {
                 // When running, rotate to face camera forward direction
                 targetAngle = Mathf.Atan2(camForward.x, camForward.z) * Mathf.Rad2Deg;
@@ -356,25 +345,12 @@ public class Run : MonoBehaviour
                 targetAngle = Mathf.Atan2(adjustedInputDir.x, adjustedInputDir.z) * Mathf.Rad2Deg;
             }
             
-            float angle = Mathf.SmoothDampAngle(transform.eulerAngles.y, targetAngle, ref runSpeedSmoothVelocity, 0.05f);
+            float angle = Mathf.SmoothDampAngle(transform.eulerAngles.y, targetAngle, ref rotationVelocity, 0.05f);
             transform.rotation = Quaternion.Euler(0f, angle, 0f);
         }
 
-        // Apply movement - integrate with Jump script
-        if (jumpScript != null)
-        {
-            // FIXED: Use GetVerticalVelocity() method instead of property
-            float verticalVelocity = jumpScript.GetVerticalVelocity();
-            
-            // Combine horizontal movement with vertical velocity
-            Vector3 finalMovement = moveDirection + new Vector3(0, verticalVelocity, 0);
-            controller.Move(finalMovement * Time.deltaTime);
-        }
-        else
-        {
-            // Apply only horizontal movement if no Jump script
-            controller.Move(moveDirection * Time.deltaTime);
-        }
+        // Apply movement
+        controller.Move(moveDirection * Time.deltaTime);
     }
 
     private IEnumerator PerformDash()
@@ -405,13 +381,6 @@ public class Run : MonoBehaviour
         dashDirection = dashDir; // Store for rotation
         dashVelocity = dashDir * (dashDistance / dashDuration);
 
-        // If Jump script exists, cancel vertical velocity during dash
-        if (jumpScript != null)
-        {
-            // FIXED: Use SetVerticalVelocity() method
-            jumpScript.SetVerticalVelocity(0f);
-        }
-
         yield return new WaitForSeconds(dashDuration);
 
         isDashing = false;
@@ -441,9 +410,6 @@ public class Run : MonoBehaviour
         }
     }
     
-    // Public methods for other scripts
-    public bool IsGrounded() => isGrounded;
-    public bool IsDashing() => isDashing;
-    public Vector3 GetMoveDirection() => moveDirection;
-    public float GetCurrentSpeed() => currentMoveSpeed;
+    // Private variable for rotation smoothing (needed for dash rotation)
+    private float rotationVelocity;
 }
